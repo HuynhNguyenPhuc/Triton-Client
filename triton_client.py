@@ -26,11 +26,13 @@ class BaseTritonClient(ABC):
         server_url: str,
         model_name: str,
         model_version: str = "1",
+        device: str = "cuda",
         verbose: bool = False
     ):
         self.model_name = model_name
         self.model_version = model_version
         self._client = self._initialize_client(server_url, verbose)
+        self._device = device
 
         if not self._client.is_server_live():
             raise ConnectionError("Triton server is not live. Ensure the server is running.")
@@ -65,12 +67,39 @@ class BaseTritonClient(ABC):
         """
         Process arguments and call the protocol-specific infer method.
         """
+        if len(args) > len(self._input_names):
+            raise ValueError(
+                f"Receive {len(args)} positional arguments, but model '{self.model_name}' "
+                f"only accepts {len(self._input_names)}. Valid inputs are: {self._input_names}"
+            )
+
         inputs_data: Dict[str, torch.Tensor] = {}
-        if args:
-            for i, arg in enumerate(args):
-                inputs_data[self._input_names[i]] = arg
-        if kwargs:
-            inputs_data.update(kwargs)
+
+        # Positional Arguments
+        for i, arg in enumerate(args):
+            input_name = self._input_names[i]
+            inputs_data[input_name] = arg
+
+        # Keyword Arguments
+        for name, data in kwargs.items():
+            if name not in self._input_names:
+                raise ValueError(
+                    f"'{name}' is not a valid input name for model '{self.model_name}'. "
+                    f"Valid names are: {self._input_names}"
+                )
+            if name in inputs_data:
+                raise ValueError(
+                    f"Receive duplicate value for input '{name}'. "
+                    "It was provided as both a positional and keyword argument."
+                )
+            inputs_data[name] = data
+
+        # Check if all required inputs are present
+        required_inputs = set(self._input_names)
+        provided_inputs = set(inputs_data.keys())
+        if required_inputs != provided_inputs:
+            missing = sorted(list(required_inputs - provided_inputs))
+            raise ValueError(f"Missing required inputs for model '{self.model_name}': {missing}")
 
         outputs_dict = self.infer(inputs_data)
         outputs = [outputs_dict[meta['name']] for meta in self._outputs_metadata]
@@ -136,7 +165,7 @@ class TritonGrpcClient(BaseTritonClient):
         for meta in self._outputs_metadata:
             name = meta['name']
             numpy_output = response.as_numpy(name)
-            outputs[name] = torch.from_numpy(numpy_output).cuda()
+            outputs[name] = torch.from_numpy(numpy_output).to(self._device)
         return outputs
 
 
@@ -175,5 +204,5 @@ class TritonHttpClient(BaseTritonClient):
         for meta in self._outputs_metadata:
             name = meta['name']
             numpy_output = response.as_numpy(name)
-            outputs[name] = torch.from_numpy(numpy_output) .cuda()
+            outputs[name] = torch.from_numpy(numpy_output).to(self._device)
         return outputs
